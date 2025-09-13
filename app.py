@@ -7,13 +7,22 @@ from datetime import datetime, timedelta
 import hashlib
 import uuid
 from dateutil import parser
-
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import random
 import io
 import math
+# ML Model Imports
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+import joblib
 
 # ---------------------------
 # Configuration & Styling
@@ -63,10 +72,20 @@ def load_css():
         border-color: #667eea;
     }
     
-    .recommended-plan {
-        border: 2px solid #10b981;
-        background: linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%);
-    }
+    # .recommended-plan {
+    #     border: 2px solid #10b981;
+    #     background: linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%);
+    # }
+
+
+     .recommended-plan {
+            border: 2px solid #10b981;
+            background: linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%);
+            padding: 1.25rem;            /* inner spacing */
+            border-radius: 12px;         /* rounded corners */
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); /* subtle shadow */
+            margin-bottom: 1.5rem;       /* space before the buttons */
+        }
     
     .current-plan-card {
         background: linear-gradient(135deg, #f8fafc 0%, #ffffff 100%);
@@ -959,7 +978,6 @@ def get_usage_for_user(user_id, days=30):
     return pd.DataFrame(data, columns=cols)
 
 
-
 def get_user_notifications(user_id, limit=10, unread_only=False):
     """Get recent notifications for a user, optionally only unread ones"""
     if not column_exists('notifications', 'created_date'):
@@ -1297,7 +1315,6 @@ def engineer_features(df):
     
     return df
 
-#
 
 def train_recommendation_model():
     """Train a recommendation model for plan suggestions"""
@@ -1806,7 +1823,6 @@ def render_partial_circle_progress(days_left, start_date, end_date, pct_visible=
 
 
 
-
 def render_plan_card(
     plan,
     is_current: bool = False,
@@ -1815,6 +1831,7 @@ def render_plan_card(
     current_user_id: int | None = None,
     section: str = "test"
         ):
+    print(plan)
     card_class = "current-plan-card" if is_current else "recommended-plan" if is_recommended else "plan-card"
 
     status_badge = ""
@@ -1824,7 +1841,7 @@ def render_plan_card(
         status_badge = '<span class="status-active">Recommended</span>'
 
     features_text = plan.get('features', '')
-    upload_speed = plan.get('upload_speed_mbps', plan['speed_mbps'] // 10)
+    upload_speed = plan.get('upload_speed_mbps') or (plan['speed_mbps'] // 10)
 
     st.markdown(f"""
     <div class="{card_class}">
@@ -1840,9 +1857,9 @@ def render_plan_card(
             </div>
         </div>
         <div style="margin: 1rem 0;">
-            <div style="color:blue;display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem;">
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem;">
                 <div><strong>Download:</strong> {plan['speed_mbps']} Mbps</div>
-                <div><strong>Upload:</strong> {upload_speed} Mbps</div>
+                <div><strong>Upload:</strong> {100} Mbps</div>
                 <div><strong>Data:</strong> {'Unlimited' if plan.get('is_unlimited') else f"{plan['data_limit_gb']} GB"}</div>
                 <div><strong>Validity:</strong> {plan['validity_days']} days</div>
             </div>
@@ -1856,7 +1873,7 @@ def render_plan_card(
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button(
-                f"Subscribe to {plan['name']}",
+                f"Subscribe",
                 key=f"{sec}_sub_{plan['id']}_{current_user_id}",
                 use_container_width=True
             ):
@@ -2003,7 +2020,7 @@ def render_plan_comparison():
                 'Plan Name': plan['name'],
                 'Price (₹)': plan['price'],
                 'Speed (Mbps)': plan['speed_mbps'],
-                'Upload (Mbps)': plan.get('upload_speed_mbps', plan['speed_mbps'] // 10),
+                'Upload (Mbps)': 100,
                 'Data Limit': 'Unlimited' if plan.get('is_unlimited') else f"{plan['data_limit_gb']} GB",
                 'Validity': f"{plan['validity_days']} days",
                 'Type': plan.get('plan_type', 'basic').title(),
@@ -2110,72 +2127,286 @@ def render_billing_history(user_id):
                      labels={'amount': 'Amount (₹)', 'month_year': 'Month'})
         st.plotly_chart(fig, use_container_width=True)
 
+# ---------------------------
+# Enhanced User Dashboard
+# ---------------------------
+#
 
-def modify_subscribed_plans(user_id):
-    """Render all subscribed plans with Cancel buttons"""
-    st.subheader("Your Subscribed Plans")
-    
-    # Query user's active subscriptions
-    query = """
-    SELECT s.id as subscription_id, s.start_date, s.end_date,
-           pl.id as plan_id, pl.name as plan_name, pl.price, pl.speed_mbps,
-           pl.upload_speed_mbps, pl.data_limit_gb, pl.is_unlimited, pl.validity_days
-    FROM subscriptions s
-    LEFT JOIN plans pl ON s.plan_id = pl.id
-    WHERE s.user_id = ? AND s.status = 'active'
-    ORDER BY s.start_date DESC
+def process_plan_upgrade(user_id, plan_id):
     """
+    Handles the upgrade process for a user's subscription plan.
     
-    subs_df = df_from_query(query, (user_id,))
-    
-    if subs_df.empty:
-        st.info("You have no active subscriptions.")
-        return
-    
-    # Loop through each subscription and display details
-    for index, row in subs_df.iterrows():
-        st.markdown(f"""
-                    <div style="
-                        border: 1px solid #ddd; 
-                        border-radius: 12px; 
-                        padding: 16px; 
-                        margin-bottom: 16px; 
-                        background: lightblue; 
-                        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
-                    ">
-                        <h3 style="margin-top: 0; color: #2563eb;">{row['plan_name']}</h3>
-                        <p style="margin: 4px 0; font-size: 16px; color: #111;">
-                            <strong>Price:</strong> ₹{row['price']} /month
-                        </p>
-                        <p style="margin: 4px 0; color: #374151;">
-                            <strong>Download:</strong> {row['speed_mbps']} Mbps &nbsp;|&nbsp; 
-                            <strong>Upload:</strong> {row.get('upload_speed_mbps', row['speed_mbps']//10)} Mbps
-                        </p>
-                        <p style="margin: 4px 0; color: #374151;">
-                            <strong>Data:</strong> {'Unlimited' if row.get('is_unlimited') else f"{row.get('data_limit_gb',0)} GB"}
-                        </p>
-                        <p style="margin: 4px 0; color: #374151;">
-                            <strong>Validity:</strong> {row.get('validity_days', 0)} days
-                        </p>
-                        <p style="margin: 4px 0; color: #6b7280; font-size: 14px;">
-                            <strong>Start:</strong> {row['start_date']} &nbsp;|&nbsp; 
-                            <strong>End:</strong> {row['end_date']}
-                        </p>
-                    </div>
-                    """, unsafe_allow_html=True)
-
+    Args:
+        user_id (int): The ID of the user upgrading their plan
+        plan_id (int): The ID of the new plan to upgrade to
         
-        # Cancel button
-        if st.button(f"❌ Cancel {row['plan_name']}", key=f"cancel_{row['subscription_id']}"):
-            # Delete subscription from DB (replace with your DB logic)
-            conn = sqlite3.connect('broadband.db')  # replace with your DB
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM subscriptions WHERE id = ?", (row['subscription_id'],))
-            conn.commit()
-            conn.close()
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    try:
+        # Get current active subscription
+        current_sub = get_user_active_subscription(user_id)
+        if not current_sub:
+            return False, "No active subscription found"
             
-            st.success(f"Subscription to {row['plan_name']} has been canceled!")
+        # Get current and new plan details
+        current_plan = get_plan(current_sub['plan_id'])
+        new_plan = get_plan(plan_id)
         
+        # Validate that new plan is actually an upgrade
+        if new_plan['price'] <= current_plan['price']:
+            return False, "Selected plan is not an upgrade"
+            
+        # Calculate prorated amount if needed
+        today = datetime.utcnow().date()
+        end_date = datetime.fromisoformat(current_sub['end_date']).date()
+        days_remaining = (end_date - today).days
+        total_days = (end_date - datetime.fromisoformat(current_sub['start_date']).date()).days
+        
+        # Calculate prorated price difference
+        price_difference = new_plan['price'] - current_plan['price']
+        prorated_amount = (price_difference * days_remaining) / total_days
+        
+        # Process payment for prorated amount (simplified)
+        payment_success = process_payment(user_id, prorated_amount)
+        if not payment_success:
+            return False, "Payment failed. Please try again."
+            
+        # Create new subscription record
+        new_subscription = {
+            'user_id': user_id,
+            'plan_id': plan_id,
+            'start_date': today.isoformat(),
+            'end_date': end_date.isoformat(),
+            'status': 'active',
+            'price_paid': prorated_amount,
+            'created_at': datetime.utcnow().isoformat()
+        }
+        
+        # Save new subscription to database
+        new_sub_id = exec_query(
+            "INSERT INTO subscriptions (user_id, plan_id, start_date, end_date, status, created_date) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, plan_id, today.isoformat(), end_date.isoformat(), 'active', datetime.utcnow().isoformat())
+        )
+        new_sub_id = exec_query("SELECT last_insert_rowid()", fetch=True)[0][0]
+        
+        # Cancel current subscription
+        exec_query(
+            "UPDATE subscriptions SET status = 'upgraded', end_date = ? WHERE id = ?",
+            (today.isoformat(), current_sub['id'])
+        )
+        
+        # Log the upgrade
+        if column_exists('subscriptions', 'renewal_count'):
+            exec_query(
+                "INSERT INTO subscription_log (user_id, subscription_id, action, from_plan_id, to_plan_id, created_date) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, new_sub_id, 'upgrade', current_plan['id'], new_plan['id'], datetime.utcnow().isoformat())
+            )
+        
+        # Send confirmation notification
+        exec_query(
+            "INSERT INTO notifications (user_id, message, notification_type, created_date) VALUES (?, ?, ?, ?)",
+            (user_id, f"Your plan has been upgraded to {new_plan['name']}. Enjoy your enhanced benefits!", 'plan_upgrade', datetime.utcnow().isoformat())
+        )
+        
+        return True, "Plan upgraded successfully!"
+        
+    except Exception as e:
+        # Log the error
+        print(f"Plan upgrade failed for user {user_id}: {str(e)}")
+        return False, f"Upgrade failed: {str(e)}"
+
+
+def process_plan_downgrade(user_id, plan_id):
+    """
+    Handles the downgrade process for a user's subscription plan.
+    
+    Args:
+        user_id (int): The ID of the user downgrading their plan
+        plan_id (int): The ID of the new plan to downgrade to
+        
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    try:
+        # Get current active subscription
+        current_sub = get_user_active_subscription(user_id)
+        if not current_sub:
+            return False, "No active subscription found"
+            
+        # Get current and new plan details
+        current_plan = get_plan(current_sub['plan_id'])
+        new_plan = get_plan(plan_id)
+        
+        # Validate that new plan is actually a downgrade
+        if new_plan['price'] >= current_plan['price']:
+            return False, "Selected plan is not a downgrade"
+            
+        # Get current billing cycle end date
+        current_end_date = datetime.fromisoformat(current_sub['end_date']).date()
+        
+        # Schedule downgrade for next billing cycle
+        new_start_date = current_end_date + timedelta(days=1)
+        new_end_date = new_start_date + timedelta(days=new_plan['validity_days'])
+        
+        # Create new subscription record for future activation
+        new_sub_id = exec_query(
+            "INSERT INTO subscriptions (user_id, plan_id, start_date, end_date, status, created_date) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, plan_id, new_start_date.isoformat(), new_end_date.isoformat(), 'pending', datetime.utcnow().isoformat())
+        )
+        new_sub_id = exec_query("SELECT last_insert_rowid()", fetch=True)[0][0]
+        
+        # Update current subscription to reflect pending downgrade
+        exec_query(
+            "UPDATE subscriptions SET status = 'pending_downgrade', next_subscription_id = ? WHERE id = ?",
+            (new_sub_id, current_sub['id'])
+        )
+        
+        # Log the downgrade
+        if column_exists('subscriptions', 'renewal_count'):
+            exec_query(
+                "INSERT INTO subscription_log (user_id, subscription_id, action, from_plan_id, to_plan_id, created_date) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, new_sub_id, 'downgrade', current_plan['id'], new_plan['id'], datetime.utcnow().isoformat())
+            )
+        
+        # Send confirmation notification
+        exec_query(
+            "INSERT INTO notifications (user_id, message, notification_type, created_date) VALUES (?, ?, ?, ?)",
+            (user_id, f"Your plan will be downgraded to {new_plan['name']} starting {new_start_date.strftime('%Y-%m-%d')}.", 'plan_downgrade', datetime.utcnow().isoformat())
+        )
+        
+        return True, "Plan downgrade scheduled successfully!"
+        
+    except Exception as e:
+        # Log the error
+        print(f"Plan downgrade failed for user {user_id}: {str(e)}")
+        return False, f"Downgrade failed: {str(e)}"
+
+
+def process_subscription_cancellation(user_id):
+    """
+    Handles the cancellation process for a user's subscription.
+    
+    Args:
+        user_id (int): The ID of the user cancelling their subscription
+        
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    try:
+        # Get current active subscription
+        current_sub = get_user_active_subscription(user_id)
+        if not current_sub:
+            return False, "No active subscription found"
+            
+        # Get current plan details
+        current_plan = get_plan(current_sub['plan_id'])
+        
+        # Get current billing cycle end date
+        current_end_date = datetime.fromisoformat(current_sub['end_date']).date()
+        today = datetime.utcnow().date()
+        
+        # Determine effective cancellation date
+        if current_end_date > today:
+            # Cancel at end of current billing period
+            effective_date = current_end_date
+            status = 'cancelled'
+            message = f"Your subscription will be cancelled on {effective_date.strftime('%Y-%m-%d')}."
+        else:
+            # Cancel immediately
+            effective_date = today
+            status = 'cancelled_immediate'
+            message = "Your subscription has been cancelled immediately."
+            
+        # Calculate potential refund (if any)
+        refund_amount = 0
+        if status == 'cancelled_immediate':
+            # Calculate prorated refund for unused days
+            start_date = datetime.fromisoformat(current_sub['start_date']).date()
+            total_days = (current_end_date - start_date).days
+            unused_days = (current_end_date - today).days
+            refund_amount = (current_plan['price'] * unused_days) / total_days
+            
+            # Process refund
+            if refund_amount > 0:
+                process_refund(user_id, refund_amount)
+        
+        # Update subscription record
+        exec_query(
+            "UPDATE subscriptions SET status = ?, end_date = ? WHERE id = ?",
+            (status, effective_date.isoformat(), current_sub['id'])
+        )
+        
+        # Log the cancellation
+        if column_exists('subscriptions', 'renewal_count'):
+            exec_query(
+                "INSERT INTO subscription_log (user_id, subscription_id, action, created_date) VALUES (?, ?, ?, ?)",
+                (user_id, current_sub['id'], 'cancellation', datetime.utcnow().isoformat())
+            )
+        
+        # Send confirmation notification
+        exec_query(
+            "INSERT INTO notifications (user_id, message, notification_type, created_date) VALUES (?, ?, ?, ?)",
+            (user_id, message, 'subscription_cancelled', datetime.utcnow().isoformat())
+        )
+        
+        return True, message
+        
+    except Exception as e:
+        # Log the error
+        print(f"Subscription cancellation failed for user {user_id}: {str(e)}")
+        return False, f"Cancellation failed: {str(e)}"
+
+
+# Helper functions for payment processing (simplified implementations)
+def process_payment(user_id, amount):
+    """
+    Process payment for a user (simplified implementation)
+    
+    Args:
+        user_id (int): User ID
+        amount (float): Payment amount
+        
+    Returns:
+        bool: True if payment successful, False otherwise
+    """
+    # In a real implementation, this would integrate with a payment gateway
+    # For this demo, we'll just simulate a successful payment
+    try:
+        # Create a payment record
+        exec_query(
+            "INSERT INTO payments (user_id, amount, payment_date, status, payment_method, bill_month, bill_year, transaction_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, amount, datetime.utcnow().isoformat(), 'paid', 'credit_card', datetime.utcnow().month, datetime.utcnow().year, f"TXN{uuid.uuid4().hex[:8].upper()}")
+        )
+        return True
+    except Exception as e:
+        print(f"Payment processing failed: {str(e)}")
+        return False
+
+
+def process_refund(user_id, amount):
+    """
+    Process refund for a user (simplified implementation)
+    
+    Args:
+        user_id (int): User ID
+        amount (float): Refund amount
+        
+    Returns:
+        bool: True if refund successful, False otherwise
+    """
+    # In a real implementation, this would integrate with a payment gateway
+    # For this demo, we'll just simulate a successful refund
+    try:
+        # Create a refund record (negative payment)
+        exec_query(
+            "INSERT INTO payments (user_id, amount, payment_date, status, payment_method, bill_month, bill_year, transaction_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, -amount, datetime.utcnow().isoformat(), 'refunded', 'credit_card', datetime.utcnow().month, datetime.utcnow().year, f"REFUND{uuid.uuid4().hex[:8].upper()}")
+        )
+        return True
+    except Exception as e:
+        print(f"Refund processing failed: {str(e)}")
+        return False
 
 
 def user_dashboard(user):
@@ -2185,7 +2416,6 @@ def user_dashboard(user):
     # Add notifications in sidebar
     st.sidebar.subheader("Notifications")
     unread_notifications = get_user_notifications(user['id'], limit=5, unread_only=True)
-
     if unread_notifications:
         for notification in unread_notifications:
             with st.sidebar.expander(f"New: {notification['notification_type'].replace('_', ' ').title()}"):
@@ -2217,26 +2447,21 @@ def user_dashboard(user):
             .card-container {
                 transition: all 0.3s ease;
             }
-
             .card-container:hover {
                 transform: translateY(-8px);
-                box-shadow: 0 12px 24px rgba(0,0,0,0.15) !important;
+                box-shadow: 0 12px  24px rgba(0,0,0,0.15) !important;
                 background: linear-gradient(135deg, #ffffff 0%, #e3f2fd 100%) !important;
                 border-color: #87CEEB !important;
             }
-
             .card-container:hover .card-title {
                 color: white !important;
             }
-
             .card-container:hover .card-icon {
                 filter: drop-shadow(0 2px 4px rgba(255,255,255,0.3)) !important;
             }
-
             .card-button {
                 transition: all 0.3s ease;
             }
-
             .card-button:hover {
                 background: white !important;
                 color: #2563eb !important;
@@ -2245,9 +2470,7 @@ def user_dashboard(user):
             }
             </style>
             """, unsafe_allow_html=True)
-
     col1, col2, col3, col4 = st.columns(4)
-
     card_style = """
             <div class="card-container" style="
             background: white;
@@ -2287,46 +2510,43 @@ def user_dashboard(user):
             ">{btn_text}</button>
         </div>
         """
-
     with col1:
         st.markdown(card_style.format(
                     icon="📶", 
                     title="My WiFi", 
                     btn_text="Manage"
                 ), unsafe_allow_html=True)
-
     with col2:
         st.markdown(card_style.format(
                     icon="🆕", 
                     title="New Connection", 
                     btn_text="Apply"
                 ), unsafe_allow_html=True)
-
     with col3:
         st.markdown(card_style.format(
                     icon="💳", 
                     title="Pay Bills", 
                     btn_text="Pay Now"
                 ), unsafe_allow_html=True)
-
     with col4:
         st.markdown(card_style.format(
                     icon="🛠️", 
                     title="Support", 
                     btn_text="Get Help"
                 ), unsafe_allow_html=True)
-
     st.markdown("---")
     
     # ============================================================================
     # SECTION TABS/NAVIGATION
     # ============================================================================
     
+    # Initialize session state for active section if not exists
     if 'active_section' not in st.session_state:
         st.session_state.active_section = 'current_plan'
     
+    # Section buttons
     st.markdown("### 📋 Dashboard Sections")
-    col1, col2, col3, col4, col5,col6 = st.columns(6)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         if st.button("📶 Current Plan", use_container_width=True, 
@@ -2352,10 +2572,6 @@ def user_dashboard(user):
         if st.button("📋 Subscription History", use_container_width=True,
                     type="primary" if st.session_state.active_section == 'subscription_history' else "secondary"):
             st.session_state.active_section = 'subscription_history'
-    with col6:
-        if st.button("Cancel Plans", use_container_width=True,
-                    type="primary" if st.session_state.active_section == 'cancel_plans' else "secondary"):
-            st.session_state.active_section = 'cancel_plans'
     
     st.markdown("---")
     
@@ -2363,13 +2579,14 @@ def user_dashboard(user):
     # SECTION CONTENT BASED ON SELECTION
     # ============================================================================
     
-    # CURRENT PLAN SECTION
+    # CURRENT PLAN SECTION (Default)
     if st.session_state.active_section == 'current_plan':
         st.markdown("## 📶 Your Current Plan")
         
         if current_sub:
             current_plan = get_plan(current_sub['plan_id'])
             
+            # Calculate days remaining and percentage
             try:
                 start_date = datetime.fromisoformat(current_sub['start_date']).date()
                 end_date = datetime.fromisoformat(current_sub['end_date']).date()
@@ -2394,17 +2611,129 @@ def user_dashboard(user):
                     
                 with col2:
                     render_plan_card(current_plan, is_current=True, show_actions=False)
-
             except Exception as e:
                 render_plan_card(current_plan, is_current=True, show_actions=False)
-
+            
+            # Add Upgrade, Downgrade, and Cancel options
+            st.markdown("### 🔄 Manage Your Plan")
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("⬆️ Upgrade Plan", use_container_width=True):
+                    # Get all plans sorted by price (ascending)
+                    all_plans = get_all_plans()
+                    sorted_plans = sorted(all_plans, key=lambda x: x['price'])
+                    
+                    # Find current plan index
+                    current_index = next((i for i, plan in enumerate(sorted_plans) 
+                                         if plan['id'] == current_plan['id']), None)
+                    
+                    if current_index is not None and current_index < len(sorted_plans) - 1:
+                        # Get next higher plan
+                        upgrade_plan = sorted_plans[current_index + 1]
+                        st.session_state.selected_plan_id = upgrade_plan['id']
+                        st.session_state.plan_action = "upgrade"
+                        st.rerun()
+                    else:
+                        st.warning("You're already on our highest plan!")
+            
+            with col2:
+                if st.button("⬇️ Downgrade Plan", use_container_width=True):
+                    # Get all plans sorted by price (ascending)
+                    all_plans = get_all_plans()
+                    sorted_plans = sorted(all_plans, key=lambda x: x['price'])
+                    
+                    # Find current plan index
+                    current_index = next((i for i, plan in enumerate(sorted_plans) 
+                                         if plan['id'] == current_plan['id']), None)
+                    
+                    if current_index is not None and current_index > 0:
+                        # Get next lower plan
+                        downgrade_plan = sorted_plans[current_index - 1]
+                        st.session_state.selected_plan_id = downgrade_plan['id']
+                        st.session_state.plan_action = "downgrade"
+                        st.rerun()
+                    else:
+                        st.warning("You're already on our lowest plan!")
+            
+            with col3:
+                if st.button("❌ Cancel Subscription", use_container_width=True):
+                    st.session_state.show_cancel_confirmation = True
+            
+            # Show plan change confirmation if needed
+            if 'selected_plan_id' in st.session_state and 'plan_action' in st.session_state:
+                selected_plan = get_plan(st.session_state.selected_plan_id)
+                
+                st.markdown(f"### 🔄 Confirm {st.session_state.plan_action.title()}")
+                render_plan_card(selected_plan, is_current=False, show_actions=False)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Confirm Change", use_container_width=True):
+                        # Process the plan change
+                        if st.session_state.plan_action == "upgrade":
+                            process_plan_upgrade(user['id'], st.session_state.selected_plan_id)
+                            st.success("Plan upgraded successfully!")
+                        elif st.session_state.plan_action == "downgrade":
+                            process_plan_downgrade(user['id'], st.session_state.selected_plan_id)
+                            st.success("Plan downgraded successfully!")
+                        
+                        # Clear session state
+                        del st.session_state.selected_plan_id
+                        del st.session_state.plan_action
+                        st.rerun()
+                
+                with col2:
+                    if st.button("Cancel", use_container_width=True):
+                        # Clear session state
+                        del st.session_state.selected_plan_id
+                        del st.session_state.plan_action
+                        st.rerun()
+            
+            # Show cancellation confirmation if needed
+            if st.session_state.get('show_cancel_confirmation', False):
+                st.markdown("### ⚠️ Confirm Cancellation")
+                st.warning("Are you sure you want to cancel your subscription?")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Yes, Cancel Subscription", use_container_width=True):
+                        process_subscription_cancellation(user['id'])
+                        st.success("Subscription cancelled successfully!")
+                        st.session_state.show_cancel_confirmation = False
+                        st.rerun()
+                
+                with col2:
+                    if st.button("No, Keep Subscription", use_container_width=True):
+                        st.session_state.show_cancel_confirmation = False
+                        st.rerun()
         else:
             st.info("🎯 You don't have an active plan. Choose one below to get started!")
+        
+        # ML Recommendations Section (part of current plan section)
+        st.markdown("---")
+        st.markdown("### 🎯 Recommended Plans for You")
+        
+        recommended_plans = ml_recommendation_for_user(user['id'], num_recommendations=2)
+        
+        if recommended_plans:
+            cols = st.columns(2)
+            for i, plan in enumerate(recommended_plans):
+                with cols[i]:
+                    render_plan_card(
+                        plan,
+                        is_recommended=True,
+                        current_user_id=user['id'],
+                        section="recommended"
+                    )
+        else:
+            st.info("No recommendations available at the moment.")
     
     # DATA USAGE INSIGHTS SECTION
     elif st.session_state.active_section == 'data_usage':
         st.markdown("## 📊 Data Usage Insights")
         
+        # Usage overview
         st.markdown("### 📈 Usage Overview")
         render_usage_analytics(user['id'])
         
@@ -2413,6 +2742,7 @@ def user_dashboard(user):
         
         usage_df = get_usage_for_user(user['id'], days=60)
         if not usage_df.empty:
+            # Usage pattern analysis
             avg_daily = usage_df['data_used_gb'].mean()
             
             col1, col2 = st.columns(2)
@@ -2433,6 +2763,7 @@ def user_dashboard(user):
                 st.success(f"**Recommendation:** {recommendation}")
             
             with col2:
+                # Usage vs Plan comparison
                 if current_sub:
                     current_plan = get_plan(current_sub['plan_id'])
                     monthly_usage = avg_daily * 30
@@ -2453,6 +2784,7 @@ def user_dashboard(user):
     elif st.session_state.active_section == 'all_plans':
         st.markdown("## 📋 All Available Plans")
         
+        # Plan filters
         col1, col2, col3 = st.columns(3)
         with col1:
             price_filter = st.selectbox("Filter by Price", 
@@ -2464,9 +2796,11 @@ def user_dashboard(user):
             type_filter = st.selectbox("Filter by Type",
                                       ["All", "Basic", "Standard", "Premium", "Elite"])
         
+        # Get and filter plans
         all_plans = get_all_plans()
         filtered_plans = all_plans.copy()
         
+        # Apply filters
         if price_filter != "All":
             if price_filter == "Under ₹500":
                 filtered_plans = [p for p in filtered_plans if p['price'] < 500]
@@ -2486,6 +2820,7 @@ def user_dashboard(user):
         if type_filter != "All":
             filtered_plans = [p for p in filtered_plans if p.get('plan_type', 'basic').lower() == type_filter.lower()]
         
+        # Display filtered plans
         if filtered_plans:
             for plan in filtered_plans:
                 is_current_plan = current_sub and plan['id'] == current_sub['plan_id']
@@ -2526,11 +2861,6 @@ def user_dashboard(user):
         else:
             st.info("No subscription history available.")
 
-    elif st.session_state.active_section == 'cancel_plans':
-        modify_subscribed_plans(user['id'])
-
-
-
 
 # ---------------------------
 # Enhanced Admin Dashboard
@@ -2539,11 +2869,615 @@ def admin_dashboard(user):
     st.title("🛠️ Admin Dashboard")
     st.markdown(f"Welcome back, **{user['name']}**!")
     
+    # Quick stats overview
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_users = exec_query("SELECT COUNT(*) FROM users WHERE role = 'user'", fetch=True)[0][0]
+        render_metric_card("Total Users", total_users)
+    
+    with col2:
+        active_subs = exec_query("SELECT COUNT(*) FROM subscriptions WHERE status = 'active'", fetch=True)[0][0]
+        render_metric_card("Active Subscriptions", active_subs)
+    
+    with col3:
+        monthly_revenue_query = "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'paid'"
+        if column_exists('payments', 'payment_date'):
+            monthly_revenue_query += " AND payment_date >= date('now', '-30 days')"
+        monthly_revenue = exec_query(monthly_revenue_query, fetch=True)[0][0]
+        render_metric_card("Monthly Revenue", f"₹{monthly_revenue:,.0f}")
+    
+    with col4:
+        if column_exists('support_tickets', 'status'):
+            support_tickets = exec_query("SELECT COUNT(*) FROM support_tickets WHERE status IN ('open', 'in_progress')", fetch=True)[0][0]
+        else:
+            support_tickets = 0
+        render_metric_card("Open Tickets", support_tickets)
+
+    # Main dashboard tabs
+    tabs = st.tabs(["📊 Analytics", "🤖 ML Model", "📋 Plans Management", "👥 User Management", "🎫 Support", "⚙️ Settings"])
+    
+    with tabs[0]:
+        render_analytics_dashboard()
+    
+    with tabs[1]:
+        render_ml_model_management()
+    
+    with tabs[2]:
+        render_enhanced_plans_management()
+    
+    with tabs[3]:
+        render_user_management()
+    
+    with tabs[4]:
+        render_support_management()
+    
+    with tabs[5]:
+        render_admin_settings()
+
     
 
+
+def render_analytics_dashboard():
+    st.header("📊 Business Analytics")
+    
+    # Revenue Analytics
+    st.subheader("💰 Revenue Analytics")
+    
+    try:
+        revenue_query = "SELECT DATE(payment_date) as date, SUM(amount) as daily_revenue, COUNT(*) as transaction_count FROM payments WHERE status = 'paid'"
+        if column_exists('payments', 'payment_date'):
+            revenue_query += " AND payment_date >= date('now', '-90 days')"
+        revenue_query += " GROUP BY DATE(payment_date) ORDER BY date"
+        
+        revenue_data = df_from_query(revenue_query)
+        
+        if not revenue_data.empty :
+            revenue_data['date'] = pd.to_datetime(revenue_data['date'], errors='coerce')
+            revenue_data = revenue_data.dropna(subset=['date'])
+            
+            if not revenue_data.empty:
+                fig = px.line(revenue_data, x='date', y='daily_revenue', 
+                             title="Daily Revenue Trend (Last 90 Days)",
+                             labels={'daily_revenue': 'Revenue (₹)', 'date': 'Date'})
+                fig.update_layout(showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No valid revenue data available for chart")
+        else:
+            st.info("No revenue data available for chart")
+    except Exception as e:
+        st.error(f"Error rendering revenue analytics: {str(e)}")
+    
+    # User Growth Analytics
+    st.subheader("📈 User Growth")
+    
+    try:
+        if column_exists('users', 'signup_date'):
+            user_growth = df_from_query("""
+                SELECT 
+                    DATE(signup_date) as signup_date,
+                    COUNT(*) as new_users
+                FROM users 
+                WHERE role = 'user' AND signup_date IS NOT NULL AND signup_date >= date('now', '-90 days')
+                GROUP BY DATE(signup_date)
+                ORDER BY signup_date
+            """)
+            
+            if not user_growth.empty:
+                user_growth['signup_date'] = pd.to_datetime(user_growth['signup_date'], errors='coerce')
+                user_growth = user_growth.dropna(subset=['signup_date'])
+                
+                if not user_growth.empty:
+                    user_growth['cumulative_users'] = user_growth['new_users'].cumsum()
+                    
+                    fig = make_subplots(specs=[[{"secondary_y": True}]])
+                    fig.add_trace(
+                        go.Bar(x=user_growth['signup_date'], y=user_growth['new_users'], name="New Users"),
+                        secondary_y=False,
+                    )
+                    fig.add_trace(
+                        go.Scatter(x=user_growth['signup_date'], y=user_growth['cumulative_users'], 
+                                  name="Cumulative Users", line=dict(color='orange')),
+                        secondary_y=True,
+                    )
+                    
+                    fig.update_yaxes(title_text="New Users", secondary_y=False)
+                    fig.update_yaxes(title_text="Cumulative Users", secondary_y=True)
+                    fig.update_layout(title="User Registration Trend")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No valid user growth data available for chart")
+            else:
+                st.info("No user growth data available for chart")
+        else:
+            st.info("User signup dates not available - run database migration")
+    except Exception as e:
+        st.error(f"Error rendering user growth analytics: {str(e)}")
+    
+    # Plan Performance
+    st.subheader("📋 Plan Performance")
+    
+    try:
+        plan_stats = df_from_query("""
+            SELECT 
+                p.name as plan_name,
+                COUNT(s.id) as subscription_count,
+                SUM(CASE WHEN pay.status = 'paid' THEN pay.amount ELSE 0 END) as total_revenue
+            FROM plans p
+            LEFT JOIN subscriptions s ON p.id = s.plan_id
+            LEFT JOIN payments pay ON s.id = pay.subscription_id
+            GROUP BY p.id, p.name
+            ORDER BY subscription_count DESC
+        """)
+        
+        if not plan_stats.empty:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig = px.bar(plan_stats, x='plan_name', y='subscription_count',
+                            title="Plan Popularity (Total Subscriptions)")
+                fig.update_xaxes(tickangle=45)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # with col2:
+            #     revenue_data = plan_stats[plan_stats['total_revenue'] > 0]
+            #     if not revenue_data.empty:
+            #         fig = px.pie(revenue_data, values='total_revenue', names='plan_name',
+            #                     title="Revenue Distribution by Plan")
+            #         st.plotly_chart(fig, use_container_width=True)
+            #     else:
+            #         st.info("No revenue data available for pie chart")
+            
+            with col2:
+                revenue_data = plan_stats.groupby('plan_name', as_index=False)['total_revenue'].sum()
+
+                if revenue_data['total_revenue'].sum() > 0:
+                    # Revenue pie
+                    fig = px.pie(
+                        revenue_data,
+                        values='total_revenue',
+                        names='plan_name',
+                        title="Revenue Distribution by Plan",
+                        hole=0.35
+                    )
+                    fig.update_traces(textinfo='percent+label', hovertemplate='%{label}<br>₹%{value:,.0f}')
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    # Fallback: subscription share pie
+                    fig = px.pie(
+                        plan_stats,
+                        values='subscription_count',
+                        names='plan_name',
+                        title="Subscription Share by Plan",
+                        hole=0.35
+                    )
+                    fig.update_traces(textinfo='percent+label', hovertemplate='%{label}<br>%{value} subs')
+                    st.plotly_chart(fig, use_container_width=True)
+
+        else:
+            st.info("No plan statistics available")
+    except Exception as e:
+        st.error(f"Error rendering plan performance: {str(e)}")
+
+def render_ml_model_management():
+    st.header("🤖 Machine Learning Model Management")
+    
+    # Model status
+    col1, col2 = st.columns(2)
+    with col1:
+        if os.path.exists('recommendation_model.joblib'):
+            st.success("✅ ML Model: Active")
+        else:
+            st.warning("⚠️ ML Model: Not Trained")
+    
+    with col2:
+        model_size = 0
+        if os.path.exists('plan_recommendation_model.pkl'):
+            model_size = os.path.getsize('plan_recommendation_model.pkl') / (1024 * 1024)  # MB
+            st.info(f"Model Size: {model_size:.2f} MB")
+    
+    # Training section
+    st.subheader("Model Training")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("Train New Model", use_container_width=True):
+            with st.spinner("Training enhanced recommendation model..."):
+                model = train_recommendation_model()
+                if model:
+                    st.success("Model trained successfully!")
+                    st.rerun()
+    
+    with col2:
+        st.subheader("")
+                
+            
+    # Model performance metrics
+    if os.path.exists('plan_recommendation_model.pkl'):
+        st.subheader("Model Performance")
+        evaluate_model()
+
+def render_enhanced_plans_management():
+
+    st.header("📋 Enhanced Plans Management")
+
+    # Current plans overview
+    plans_df = df_from_query("SELECT * FROM plans ORDER BY price ASC")
+    if not plans_df.empty:
+        st.subheader("Current Plans")
+        st.dataframe(plans_df, use_container_width=True)
+
+    # ---------- Single Plan CRUD ----------
+    st.subheader("➕ Create / ✏️ Edit / 🗑️ Delete Plan")
+    action = st.radio("Action", ["Create", "Edit", "Delete"], horizontal=True, key="plan_action")
+    if action == "Create":
+        with st.form("create_plan_form", clear_on_submit=True):
+            cols = st.columns(3)
+            with cols[0]:
+                name = st.text_input("Plan Name")
+                speed = st.number_input("Download Speed (Mbps)", min_value=1, value=50)
+                upload = 100
+            with cols[1]:
+                data_limit = st.number_input("Data Limit (GB)", min_value=1.0, value=100.0, step=1.0)
+                price = st.number_input("Price (₹)", min_value=1.0, value=499.0, step=1.0)
+                validity = st.number_input("Validity (days)", min_value=1, value=30, step=1)
+            with cols[2]:
+                plan_type = st.selectbox("Plan Type", ["basic","standard","premium","elite"])
+                is_unl = st.checkbox("Unlimited Data?")
+                features = st.text_input("Features (comma-separated)", value="")
+            desc = st.text_area("Description", value="")
+            submitted = st.form_submit_button("Create Plan")
+        if submitted:
+            ok, msg = admin_create_plan(name, speed, data_limit, price, validity, desc, plan_type, int(is_unl), features, upload)
+            (st.success if ok else st.error)(msg)
+            if ok: st.rerun()
+    elif action == "Edit":
+        plans = df_from_query("SELECT id, name FROM plans ORDER BY name ASC")
+        if plans.empty:
+            st.info("No plans to edit.")
+        else:
+            sel = st.selectbox("Select Plan", options=plans['name'].tolist())
+            pid = int(plans.loc[plans['name']==sel, 'id'].iloc[0])
+            current = df_from_query("SELECT * FROM plans WHERE id = ?", (pid,))
+            row = current.iloc[0].to_dict()
+            with st.form("edit_plan_form"):
+                cols = st.columns(3)
+                with cols[0]:
+                    name = st.text_input("Plan Name", value=row.get('name',''))
+                    speed = st.number_input("Download Speed (Mbps)", min_value=1, value=int(row.get('speed_mbps',50)))
+                    upload = st.number_input("Upload Speed (Mbps)", min_value=0, value=int(row.get('upload_speed_mbps',row.get('speed_mbps',50)//10)))
+                with cols[1]:
+                    data_limit = st.number_input("Data Limit (GB)", min_value=1.0, value=float(row.get('data_limit_gb',100.0)), step=1.0)
+                    price = st.number_input("Price (₹)", min_value=1.0, value=float(row.get('price',499.0)), step=1.0)
+                    validity = st.number_input("Validity (days)", min_value=1, value=int(row.get('validity_days',30)), step=1)
+                with cols[2]:
+                    plan_type = st.selectbox("Plan Type", ["basic","standard","premium","elite"], index=max(0, ["basic","standard","premium","elite"].index(str(row.get('plan_type','basic')))) if str(row.get('plan_type','basic')) in ["basic","standard","premium","elite"] else 0)
+                    is_unl = st.checkbox("Unlimited Data?", value=bool(row.get('is_unlimited',0)))
+                    features = st.text_input("Features (comma-separated)", value=str(row.get('features','') or ''))
+                desc = st.text_area("Description", value=str(row.get('description','') or ''))
+                submitted = st.form_submit_button("Update Plan")
+            if submitted:
+                ok, msg = admin_update_plan(pid, name=name, speed_mbps=speed, upload_speed_mbps=upload, data_limit_gb=data_limit, price=price, validity_days=validity, plan_type=plan_type, is_unlimited=int(is_unl), features=features, description=desc)
+                (st.success if ok else st.error)(msg)
+                if ok: st.rerun()
+    else:  # Delete
+        plans = df_from_query("SELECT id, name FROM plans ORDER BY name ASC")
+        if plans.empty:
+            st.info("No plans to delete.")
+        else:
+            sel = st.selectbox("Select Plan to Delete", options=plans['name'].tolist(), key="plan_del_sel")
+            pid = int(plans.loc[plans['name']==sel, 'id'].iloc[0])
+            if st.button("Delete Plan", type="secondary"):
+                ok, msg = admin_delete_plan(pid)
+                (st.success if ok else st.error)(msg)
+                if ok: st.rerun()
+
+    # ---------- Bulk CSV Upload (existing) ----------
+    st.subheader("📤 Bulk Plan Upload")
+    st.markdown("**CSV Template Format:** name,speed_mbps,data_limit_gb,price,validity_days,description,plan_type,is_unlimited,features,upload_speed_mbps")
+    uploaded_file = st.file_uploader("Choose CSV file", type="csv", key="bulk_plans_upload")
+    if uploaded_file is not None:
+        try:
+            csv_content = uploaded_file.read().decode('utf-8')
+            preview_df = pd.read_csv(io.StringIO(csv_content))
+            st.subheader("📋 Preview Uploaded Data")
+            st.dataframe(preview_df, use_container_width=True)
+            ok, msg = bulk_create_plans_from_csv(csv_content)
+            (st.success if ok else st.error)(msg)
+            if ok: st.rerun()
+        except Exception as e:
+            st.error(f"CSV error: {e}")
+
+def render_user_management():
+
+    st.header("👥 User Management")
+    # Quick stats
+    col1, col2 = st.columns(2)
+    with col1:
+        total_users = exec_query("SELECT COUNT(*) FROM users WHERE role = 'user'", fetch=True)[0][0]
+        st.metric("Total Users", total_users)
+    with col2:
+        active_users = exec_query("SELECT COUNT(DISTINCT user_id) FROM subscriptions WHERE status = 'active'", fetch=True)[0][0] if column_exists('subscriptions', 'status') else 0
+        st.metric("Active Users", active_users)
+
+    st.subheader("➕ Create New User")
+    with st.form("create_user_form", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            username = st.text_input("Username")
+            name = st.text_input("Full Name")
+        with c2:
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+        with c3:
+            role = st.selectbox("Role", ["user","admin"])
+            city = st.text_input("City")
+            state = st.text_input("State")
+        submitted = st.form_submit_button("Create User")
+    if submitted:
+        ok, msg = admin_create_user(username, password, name, email, role=role, city=city, state=state)
+        (st.success if ok else st.error)(msg)
+        if ok: st.rerun()
+
+    st.subheader("✏️ Edit / 🗑️ Delete User")
+    users_df = df_from_query("SELECT id, username, name, email, role, city, state FROM users ORDER BY id DESC")
+    if users_df.empty:
+        st.info("No users found.")
+    else:
+        st.dataframe(users_df, use_container_width=True)
+        sel_name = st.selectbox("Select user by username", options=users_df['username'].tolist(), key="user_edit_sel")
+        uid = int(users_df.loc[users_df['username']==sel_name, 'id'].iloc[0])
+        current = df_from_query("SELECT * FROM users WHERE id = ?", (uid,)).iloc[0].to_dict()
+        with st.form("edit_user_form"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                new_username = st.text_input("Username", value=current.get('username',''))
+                name = st.text_input("Full Name", value=current.get('name',''))
+            with c2:
+                email = st.text_input("Email", value=current.get('email',''))
+                role = st.selectbox("Role", ["user","admin"], index=0 if current.get('role','user')=='user' else 1)
+            with c3:
+                city = st.text_input("City", value=str(current.get('city','') or ''))
+                state = st.text_input("State", value=str(current.get('state','') or ''))
+            update_btn = st.form_submit_button("Update User")
+        del_btn = st.button("Delete Selected User", type="secondary")
+        if update_btn:
+            # If username changed, ensure it's unique (handled by update attempt via helper)
+            ok, msg = admin_update_user(uid, username=new_username, name=name, email=email, role=role, city=city, state=state)
+            (st.success if ok else st.error)(msg)
+            if ok: st.rerun()
+        if del_btn:
+            ok, msg = admin_delete_user(uid)
+            (st.success if ok else st.error)(msg)
+            if ok: st.rerun()
+        
+   
     
 
 
+
+    st.subheader("Send Notifications to Users")
+
+    with st.form("send_message_form"):
+        audience = st.selectbox("Send to", ["Active Users", "Inactive Users", "All Users"])
+        message = st.text_area("Message")
+        submit_button = st.form_submit_button("Send Message")
+        
+        if submit_button:
+            if not message:
+                st.error("Message cannot be empty")
+            else:
+                count = send_message_to_users(audience, message)
+                st.success(f"Message sent to {count} users!")
+
+    # st.header("🎫 Support Ticket Management")
+    
+    # if column_exists('support_tickets', 'status'):
+    #     # Support statistics
+    #     ticket_stats = df_from_query("""
+    #         SELECT status, COUNT(*) as count
+    #         FROM support_tickets
+    #         GROUP BY status
+    #     """)
+        
+    #     if not ticket_stats.empty:
+    #         cols = st.columns(min(4, len(ticket_stats)))
+    #         for i, (_, row) in enumerate(ticket_stats.iterrows()):
+    #             with cols[i % len(cols)]:
+    #                 st.metric(f"{row['status'].title()} Tickets", row['count'])
+        
+    #     # Category breakdown
+    #     category_stats = df_from_query("""
+    #         SELECT category, COUNT(*) as count
+    #         FROM support_tickets
+    #         GROUP BY category
+    #         ORDER BY count DESC
+    #     """)
+        
+    #     if not category_stats.empty:
+    #         st.subheader("Tickets by Category")
+    #         fig = px.bar(category_stats, x='category', y='count',
+    #                     title="Support Tickets by Category")
+    #         st.plotly_chart(fig, use_container_width=True, key="tickets_by_category")
+
+        
+    #     # Recent tickets
+    #     # recent_tickets = df_from_query("""
+    #     #     SELECT 
+    #     #         st.id, st.subject, st.category, st.status, st.priority, st.created_date,
+    #     #         u.name as user_name, u.email as user_email
+    #     #     FROM support_tickets st
+    #     #     JOIN users u ON st.user_id = u.id
+    #     #     ORDER BY st.created_date DESC
+    #     #     LIMIT 50
+    #     # """)
+
+    #     # Categorize tickets into Resolved / Not Resolved / Ongoing
+    #     recent_tickets = df_from_query("""
+    #         SELECT 
+    #             st.id,
+    #             st.subject,
+    #             st.category,
+    #             CASE 
+    #                 WHEN LOWER(st.status) IN ('resolved','solved','completed') THEN 'Resolved'
+    #                 WHEN LOWER(st.status) IN ('closed','rejected','cancelled','won''t fix','invalid') THEN 'Not Resolved'
+    #                 WHEN LOWER(st.status) IN ('open','in_progress','in progress','pending','assigned','acknowledged') THEN 'Ongoing'
+    #                 ELSE 'Other'
+    #             END AS ticket_group,
+    #             st.status,
+    #             st.priority,
+    #             st.created_date,
+    #             u.name AS user_name,
+    #             u.email AS user_email
+    #         FROM support_tickets st
+    #         JOIN users u ON st.user_id = u.id
+    #         ORDER BY st.created_date DESC
+    #         LIMIT 50
+    #     """)
+
+        
+    #     if not recent_tickets.empty:
+    #         st.subheader("Recent Support Tickets")
+    #         st.dataframe(recent_tickets, use_container_width=True)
+    #     else:
+    #         st.info("No support tickets found")
+    # else:
+    #     st.info("Support ticket system not available - run database migration to enable")
+
+def render_support_management():
+    st.header("🎫 Support Ticket Management")
+
+    # Guard: table/columns present?
+    if not column_exists('support_tickets', 'status'):
+        st.info("Support ticket system not available - run database migration to enable")
+        return
+
+    # --------- Quick Stats ---------
+    ticket_stats = df_from_query("""
+        SELECT LOWER(status) AS status, COUNT(*) AS count
+        FROM support_tickets
+        GROUP BY LOWER(status)
+    """)
+    if not ticket_stats.empty:
+        cols = st.columns(min(4, len(ticket_stats)))
+        for i, (_, row) in enumerate(ticket_stats.iterrows()):
+            with cols[i % len(cols)]:
+                st.metric(f"{row['status'].title()} Tickets", row['count'])
+
+    # --------- Category Breakdown ---------
+    category_stats = df_from_query("""
+        SELECT category, COUNT(*) AS count
+        FROM support_tickets
+        GROUP BY category
+        ORDER BY count DESC
+    """)
+    if not category_stats.empty:
+        st.subheader("Tickets by Category")
+        fig = px.bar(category_stats, x='category', y='count', title="Support Tickets by Category")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # --------- Tabs: Resolved / Not Resolved / Ongoing ---------
+    st.subheader("Browse Tickets by Status")
+    tab_resolved, tab_not_resolved, tab_ongoing = st.tabs(["Resolved", "Not Resolved", "Ongoing"])
+
+    # You can tweak these buckets to match your real statuses
+    resolved_statuses = tuple(s.lower() for s in ("resolved", "solved", "completed"))
+    not_resolved_statuses = tuple(s.lower() for s in ("closed", "rejected", "cancelled", "won't fix", "invalid"))
+    ongoing_statuses = tuple(s.lower() for s in ("open", "in_progress", "in progress", "pending", "assigned", "acknowledged"))
+
+    def list_tickets(where_sql: str, params: tuple):
+        q = f"""
+            SELECT 
+                st.id,
+                st.subject,
+                st.category,
+                st.status,
+                st.priority,
+                st.created_date,
+                st.resolved_date,
+                u.name AS user_name,
+                u.email AS user_email
+            FROM support_tickets st
+            JOIN users u ON st.user_id = u.id
+            {where_sql}
+            ORDER BY st.created_date DESC
+            LIMIT 200
+        """
+        df = df_from_query(q, params)
+        if df.empty:
+            st.info("No tickets found for this tab.")
+        else:
+            st.dataframe(df, use_container_width=True)
+
+    with tab_resolved:
+        if len(resolved_statuses) == 0:
+            st.info("No 'resolved' statuses configured.")
+        else:
+            placeholders = ",".join(["?"] * len(resolved_statuses))
+            list_tickets(f"WHERE LOWER(st.status) IN ({placeholders})", resolved_statuses)
+
+    with tab_not_resolved:
+        if len(not_resolved_statuses) == 0:
+            st.info("No 'not resolved' statuses configured.")
+        else:
+            placeholders = ",".join(["?"] * len(not_resolved_statuses))
+            list_tickets(f"WHERE LOWER(st.status) IN ({placeholders})", not_resolved_statuses)
+
+    with tab_ongoing:
+        if len(ongoing_statuses) == 0:
+            st.info("No 'ongoing' statuses configured.")
+        else:
+            placeholders = ",".join(["?"] * len(ongoing_statuses))
+            list_tickets(f"WHERE LOWER(st.status) IN ({placeholders})", ongoing_statuses)
+
+
+def render_admin_settings():
+    st.header("⚙️ Admin Settings")
+    
+    st.subheader("🔧 System Configuration")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info("Database Status: ✅ Connected")
+        st.info("Migration Status: " + ("✅ Complete" if meta_get(DB_MIGRATION_FLAG) == '1' else "⚠️ Pending"))
+        
+        total_plans = exec_query("SELECT COUNT(*) FROM plans", fetch=True)[0][0]
+        st.info(f"Total Plans: {total_plans}")
+    
+    with col2:
+        if st.button("Generate Sample Data", help="Reset and generate new sample data"):
+            st.success("Sample data regenerated!")
+            
+        
+    st.subheader("📊 System Statistics")
+    
+    stats_col1, stats_col2, stats_col3 = st.columns(3)
+    
+    with stats_col1:
+        total_subscriptions = exec_query("SELECT COUNT(*) FROM subscriptions", fetch=True)[0][0]
+        total_payments = exec_query("SELECT COUNT(*) FROM payments", fetch=True)[0][0]
+        st.metric("Total Subscriptions", total_subscriptions)
+        st.metric("Total Payments", total_payments)
+    
+    with stats_col2:
+        if column_exists('usage', 'data_used_gb'):
+            total_usage = exec_query("SELECT COALESCE(SUM(data_used_gb), 0) FROM usage", fetch=True)[0][0]
+            st.metric("Total Data Usage", f"{total_usage:.0f} GB")
+        
+        if column_exists('support_tickets', 'id'):
+            total_tickets = exec_query("SELECT COUNT(*) FROM support_tickets", fetch=True)[0][0]
+            st.metric("Total Support Tickets", total_tickets)
+    
+    with stats_col3:
+        db_size = os.path.getsize(DB_PATH) / (1024 * 1024) if os.path.exists(DB_PATH) else 0
+        st.metric("Database Size", f"{db_size:.2f} MB")
+        
+        if os.path.exists('plan_recommendation_model.pkl'):
+            model_size = os.path.getsize('plan_recommendation_model.pkl') / (1024 * 1024)
+            st.metric("ML Model Size", f"{model_size:.2f} MB")
+
+def evaluate_model():
     """Evaluate the ML model performance"""
     if not os.path.exists('plan_recommendation_model.pkl'):
         st.error("No model found to evaluate")
@@ -2636,7 +3570,7 @@ def admin_dashboard(user):
 # ---------------------------
 def main():
     st.set_page_config(
-        page_title="Enhanced Broadband Portal",
+        page_title="Trailblazer",
         layout='wide',
         initial_sidebar_state="expanded",
         page_icon="📡"
@@ -2655,7 +3589,7 @@ def main():
 
     # Sidebar Authentication
     with st.sidebar:
-        st.title("📡 Broadband Portal")
+        st.title("📡 Trailblazer Broadband portal ") 
         
         if st.session_state['user'] is None:
             st.markdown("### Welcome Back")
@@ -2707,7 +3641,7 @@ def main():
         # Landing page for non-authenticated users
         st.markdown("""
         <div style="text-align: center; padding: 4rem 0;">
-            <h1 style="font-size: 3rem; margin-bottom: 1rem;">📡 Welcome to Enhanced Broadband Portal</h1>
+            <h1 style="font-size: 3rem; margin-bottom: 1rem;">📡 Welcome to Enhanced Trailblazer Broadband Portal</h1>
             <p style="font-size: 1.2rem; color: #6b7280; margin-bottom: 2rem;">
                 Your gateway to intelligent internet plans with AI-powered recommendations
             </p>
