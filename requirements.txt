@@ -1,0 +1,7 @@
+streamlit
+pandas
+numpy
+scikit-learn
+python-dateutil
+plotly
+joblib
