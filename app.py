@@ -1840,7 +1840,7 @@ def render_plan_card(
             </div>
         </div>
         <div style="margin: 1rem 0;">
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem;">
+            <div style="color:blue;display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem;">
                 <div><strong>Download:</strong> {plan['speed_mbps']} Mbps</div>
                 <div><strong>Upload:</strong> {upload_speed} Mbps</div>
                 <div><strong>Data:</strong> {'Unlimited' if plan.get('is_unlimited') else f"{plan['data_limit_gb']} GB"}</div>
@@ -2111,6 +2111,72 @@ def render_billing_history(user_id):
         st.plotly_chart(fig, use_container_width=True)
 
 
+def modify_subscribed_plans(user_id):
+    """Render all subscribed plans with Cancel buttons"""
+    st.subheader("Your Subscribed Plans")
+    
+    # Query user's active subscriptions
+    query = """
+    SELECT s.id as subscription_id, s.start_date, s.end_date,
+           pl.id as plan_id, pl.name as plan_name, pl.price, pl.speed_mbps,
+           pl.upload_speed_mbps, pl.data_limit_gb, pl.is_unlimited, pl.validity_days
+    FROM subscriptions s
+    LEFT JOIN plans pl ON s.plan_id = pl.id
+    WHERE s.user_id = ? AND s.status = 'active'
+    ORDER BY s.start_date DESC
+    """
+    
+    subs_df = df_from_query(query, (user_id,))
+    
+    if subs_df.empty:
+        st.info("You have no active subscriptions.")
+        return
+    
+    # Loop through each subscription and display details
+    for index, row in subs_df.iterrows():
+        st.markdown(f"""
+                    <div style="
+                        border: 1px solid #ddd; 
+                        border-radius: 12px; 
+                        padding: 16px; 
+                        margin-bottom: 16px; 
+                        background: lightblue; 
+                        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+                    ">
+                        <h3 style="margin-top: 0; color: #2563eb;">{row['plan_name']}</h3>
+                        <p style="margin: 4px 0; font-size: 16px; color: #111;">
+                            <strong>Price:</strong> ₹{row['price']} /month
+                        </p>
+                        <p style="margin: 4px 0; color: #374151;">
+                            <strong>Download:</strong> {row['speed_mbps']} Mbps &nbsp;|&nbsp; 
+                            <strong>Upload:</strong> {row.get('upload_speed_mbps', row['speed_mbps']//10)} Mbps
+                        </p>
+                        <p style="margin: 4px 0; color: #374151;">
+                            <strong>Data:</strong> {'Unlimited' if row.get('is_unlimited') else f"{row.get('data_limit_gb',0)} GB"}
+                        </p>
+                        <p style="margin: 4px 0; color: #374151;">
+                            <strong>Validity:</strong> {row.get('validity_days', 0)} days
+                        </p>
+                        <p style="margin: 4px 0; color: #6b7280; font-size: 14px;">
+                            <strong>Start:</strong> {row['start_date']} &nbsp;|&nbsp; 
+                            <strong>End:</strong> {row['end_date']}
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        
+        # Cancel button
+        if st.button(f"❌ Cancel {row['plan_name']}", key=f"cancel_{row['subscription_id']}"):
+            # Delete subscription from DB (replace with your DB logic)
+            conn = sqlite3.connect('broadband.db')  # replace with your DB
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM subscriptions WHERE id = ?", (row['subscription_id'],))
+            conn.commit()
+            conn.close()
+            
+            st.success(f"Subscription to {row['plan_name']} has been canceled!")
+        
+
 
 def user_dashboard(user):
     st.title("🏠 My Dashboard")
@@ -2260,7 +2326,7 @@ def user_dashboard(user):
         st.session_state.active_section = 'current_plan'
     
     st.markdown("### 📋 Dashboard Sections")
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5,col6 = st.columns(6)
     
     with col1:
         if st.button("📶 Current Plan", use_container_width=True, 
@@ -2286,6 +2352,10 @@ def user_dashboard(user):
         if st.button("📋 Subscription History", use_container_width=True,
                     type="primary" if st.session_state.active_section == 'subscription_history' else "secondary"):
             st.session_state.active_section = 'subscription_history'
+    with col6:
+        if st.button("Cancel Plans", use_container_width=True,
+                    type="primary" if st.session_state.active_section == 'cancel_plans' else "secondary"):
+            st.session_state.active_section = 'cancel_plans'
     
     st.markdown("---")
     
@@ -2455,6 +2525,10 @@ def user_dashboard(user):
             st.dataframe(history_df, use_container_width=True)
         else:
             st.info("No subscription history available.")
+
+    elif st.session_state.active_section == 'cancel_plans':
+        modify_subscribed_plans(user['id'])
+
 
 
 
